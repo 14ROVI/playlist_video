@@ -1,1 +1,5 @@
 env.py
+ffmpeg.exe
+temp/
+output/
+*.pyc

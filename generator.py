@@ -218,6 +218,7 @@ async def main():
             await asyncio.gather(*coros)
 
         print("Creating videos")
+        if not os.path.exists('output/'): os.mkdir("output/")
         videos = []
         audios = []
         for song in songs:
