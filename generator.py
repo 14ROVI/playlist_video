@@ -9,6 +9,8 @@ import os
 import html
 from fontTools.ttLib import TTFont
 from env import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+import aiofiles
+from termcolor import colored
 
 
 
@@ -27,6 +29,13 @@ ydl_opts = {
     'noplaylist': True,
     'nocheckcertificate': True
 }
+
+
+def print_green(text: str):
+    print(colored(text, "green"))
+    
+def print_red(text: str):
+    print(colored(text, "red"))
 
 
 def has_glyph(font, glyph):
@@ -58,12 +67,12 @@ def draw_text(draw, position, text, base_font, fill="black", anchor=None):
                 font = base_font
                 print(letter)
         draw.text(cursor_pos, letter, font=font, fill=fill, anchor=anchor)
-        letter_size = draw.textsize(letter, font=font)
-        cursor_pos[0] += letter_size[0]
+        letter_length = draw.textlength(letter, font=font)
+        cursor_pos[0] += letter_length
 
 
 def get_font_size(font: ImageFont.truetype, text: str, max_width: int) -> ImageFont.truetype:
-    while font.getsize(text)[0] > max_width and font.size > 10:
+    while font.getlength(text) > max_width and font.size > 10:
         font = ImageFont.truetype(font.path, font.size - 1)
     return font
 
@@ -77,41 +86,52 @@ def contrast_color(colour):
     return (d, d, d)
 
 
-async def download_audio(ytdl, session, title, track_id, i, num_songs, template, text_colour, text_font):
-    print(f"Getting audio for: {title} ({track_id})")
-
-    query_string = f"{title} [official audio]"
-    loop = asyncio.get_event_loop()
-    info = await loop.run_in_executor(
-        None,
-        ytdl.extract_info,
-        query_string,
-        False
-    )
-    if "entries" in info:
-        info = info["entries"][0]
-    song_audio_url = info["url"]
-
+async def download_audio(ytdl, session, title, track_id):
     if not os.path.exists(f"temp/{track_id}.mp3"):
+        query_string = f"{title} [official audio]"
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(
+            None,
+            ytdl.extract_info,
+            query_string,
+            False
+        )
+        if "entries" in info:
+            info = info["entries"][0]
+        song_audio_url = info["url"]
+    
         async with session.get(song_audio_url) as request:
             content = await request.read()
-            if not os.path.exists('temp/'): os.mkdir("temp/")
-            with open(f"temp/{track_id}.mp3", "wb") as file:
-                file.write(content)
+            async with aiofiles.open(f"temp/{track_id}.mp3", "wb") as file:
+                await file.write(content)
+    
+    print(f"Saved audio for: {title} ({track_id})")
 
-    print(f"Drawing frame for: {title} ({track_id})")
-    frame = template.copy()
-    draw = ImageDraw.Draw(frame)
-    draw.ellipse(
-        (1920/2+100 - text_font.size,
-        1080/2 - num_songs*text_font.size/2 + i*text_font.size + text_font.size*0.2,
-        1920/2+100 - text_font.size*0.4,
-        1080/2 - num_songs*text_font.size/2 + (i+1)*text_font.size - text_font.size*0.2),
-        fill = text_colour
-    )
-    frame.save(f"temp/{track_id}.png", "PNG")
 
-    return True
+async def draw_frame(playlist_id, title, track_id, i, num_songs, template, text_colour, text_font):
+    def inner(output):
+        frame = template.copy()
+        draw = ImageDraw.Draw(frame)
+        draw.ellipse(
+            (1920/2+100 - text_font.size,
+            1080/2 - num_songs*text_font.size/2 + i*text_font.size + text_font.size*0.2,
+            1920/2+100 - text_font.size*0.4,
+            1080/2 - num_songs*text_font.size/2 + (i+1)*text_font.size - text_font.size*0.2),
+            fill = text_colour
+        )
+        frame.save(output, "PNG")
+        
+    with BytesIO() as bytes:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            inner,
+            bytes,
+        )
+        async with aiofiles.open(f"temp/{playlist_id}-{track_id}.png", "wb") as file:
+            await file.write(bytes.getbuffer())
+
+    print(f"Drew frame for: {title} ({playlist_id}-{track_id})")
 
 
 async def main():
@@ -119,7 +139,7 @@ async def main():
     playlist_id = playlist_link.split("/")[-1].split("?")[0]
 
     async with ClientSession(headers=headers) as session:
-        print("Logging into Spotify API")
+        print_green("Logging into Spotify API")
         async with session.post(
             "https://accounts.spotify.com/api/token",
             data = {
@@ -128,12 +148,16 @@ async def main():
                 "client_secret": SPOTIFY_CLIENT_SECRET,
             }
         ) as request:
+            if not request.ok:
+                return print_red("Bad client ID or secret!")
             json_data = await request.json()
             access_token = json_data["access_token"]
             session.headers["Authorization"] = f"Bearer {access_token}"
 
-        print("Getting playlist data")
+        print_green("Getting playlist data")
         async with session.get(f"https://api.spotify.com/v1/playlists/{playlist_id}") as request:
+            if not request.ok:
+                return print_red("Bad playlist link!")
             json_data = await request.json()
             playlist_name = json_data["name"]
             playlist_subtitle = json_data["description"] or ""
@@ -141,7 +165,7 @@ async def main():
             playlist_image_url = json_data["images"][0]["url"]
             tracks_url = json_data["tracks"]["href"]
 
-        print("Getting track data")
+        print_green("Getting track data")
         async with session.get(tracks_url) as request:
             json_data = await request.json()
             songs = [
@@ -153,11 +177,18 @@ async def main():
                 } for song in json_data["items"]
             ]
 
-        print("Creating template")
+        print_green("Creating template")
         async with session.get(playlist_image_url) as request:
             playlist_image = await request.read()
             playlist_image = Image.open(BytesIO(playlist_image))
             playlist_image = playlist_image.convert("RGB")
+            width, height = playlist_image.size
+            crop_size = min(playlist_image.size)
+            playlist_image = playlist_image.crop((
+                        (width - crop_size) // 2,
+                        (height - crop_size) // 2,
+                        (width + crop_size) // 2,
+                        (height + crop_size) // 2))
             playlist_image = playlist_image.resize((650, 650))
 
         with BytesIO() as file_object:
@@ -180,7 +211,7 @@ async def main():
         template.paste(playlist_image, (int(1920/4 - playlist_image.width/2), int(1080/2 - playlist_image.height/2)))
         draw = ImageDraw.Draw(template)
         
-        title_font = ImageFont.truetype("font.ttf", 35, layout_engine=ImageFont.LAYOUT_RAQM)
+        title_font = ImageFont.truetype("font.ttf", 35)
         title_font = get_font_size(title_font, playlist_name, playlist_image.width)
         draw_text(
             draw,
@@ -193,7 +224,7 @@ async def main():
         subtitle_font = ImageFont.truetype("font.ttf", 20)
         chunks = [""]
         for word in playlist_subtitle.split(" "):
-            if subtitle_font.getsize(chunks[-1]+" "+word)[0] > playlist_image.width:
+            if subtitle_font.getlength(chunks[-1]+" "+word) > playlist_image.width:
                 chunks.append(" "+word)
             else:
                 chunks[-1] += " "+word
@@ -209,32 +240,37 @@ async def main():
         for i, song in enumerate(songs):
             draw_text(draw, (1920/2+100, 1080/2 - len(songs)*text_font.size/2 + i*text_font.size), song["name"] + " - " + song["artist"], base_font=text_font, fill=text_colour)
 
-        print("Downloading audio and creating frames")
+        print_green("Downloading audio and creating frames")
+        if not os.path.exists('temp/'): os.mkdir("temp/")
         with YoutubeDL(ydl_opts) as ytdl:
             coros = [
-                download_audio(ytdl, session, song["name"]+" - "+song["artist"], song["id"], i, len(songs), template, text_colour, text_font)
-                for i, song in enumerate(songs)
+                download_audio(ytdl, session, song["name"]+" - "+song["artist"], song["id"])
+                for song in songs
             ]
+            coros.extend([
+                draw_frame(playlist_id, song["name"]+" - "+song["artist"], song["id"], i, len(songs), template, text_colour, text_font)
+                for i, song in enumerate(songs)
+            ])
             await asyncio.gather(*coros)
 
-        print("Creating videos")
+        print_green("Creating videos")
         if not os.path.exists('output/'): os.mkdir("output/")
         videos = []
         audios = []
         for song in songs:
             track_id = song["id"]
             duration = song["duration"] / 1000
-            videos.append(ffmpeg.input(f"temp/{track_id}.png", framerate=1, t=duration, loop=1))
+            videos.append(ffmpeg.input(f"temp/{playlist_id}-{track_id}.png", framerate=1, t=duration, loop=1))
             audios.append(ffmpeg.input(f"temp/{track_id}.mp3"))
         
         (
             ffmpeg
             .concat(*[val for pair in zip(videos, audios) for val in pair], v=1, a=1)
-            .output(f"output/{playlist_name}.mp4", framerate=1, pix_fmt="yuv420p", vcodec="libx264", acodec="aac")
+            .output(f"output/{playlist_name}.mp4", framerate=1, pix_fmt="yuv420p", vcodec="libx264", acodec="aac", preset="fast")
             .overwrite_output()
             .run()
         )
-        print(f"Saved video to output/{playlist_name}.mp4!")
+        print_green(f"Saved video to output/{playlist_name}.mp4!")
 
         if input("Remove cache? [y/n]: ").lower() == "y":
             for f in os.listdir("temp/"):
@@ -244,5 +280,4 @@ async def main():
 
 
 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-loop = asyncio.get_event_loop()
-loop.run_until_complete(main())
+asyncio.run(main())

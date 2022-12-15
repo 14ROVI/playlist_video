@@ -4,3 +4,5 @@ colorthief
 yt-dlp
 ffmpeg-python
 fonttools
+aiofiles
+termcolor
